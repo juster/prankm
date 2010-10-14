@@ -1,0 +1,43 @@
+NAME
+    prankm -- Parallel ping ranker for pacman's mirrorlist.
+
+SYNOPSIS
+      prankm [-i] [-n #] [-m #.#] [/etc/pacman.d/mirrorlist]
+
+      Ranks the mirrorlist file. If a mirrorlist is not given as an
+      argument then the default /etc/pacman.d/mirrorlist file is read.
+
+      Options:
+       -n | --num      The number of top ranked servers to use in file.
+                       Set to 0 to use all servers. Default: 20
+       -m | --max      Maximum delay to wait for pings, in seconds.
+                       Default: 0.25
+       -i | --inplace  Inplace editing, overwrite source file with results.
+       -h | --help     This help screen.
+
+OPTIONS
+    -c|--count
+        rankm works by averaging out the delay of a few pings that are sent
+        to the servers. This controls how many pings are averaged out.
+
+    -m|--max
+        The maximum number of servers pacman should use. The top ranked
+        servers are left uncommented in the output, with the rest commented
+        out.
+
+    -i|--inplace
+        Overwrite the *first* source file given or
+        */etc/pacman.d/mirrorlist* if none were specified.
+
+SEE ALSO
+    pacman(8)
+
+AUTHOR
+    Justin Davis `<juster at cpan dot org>'
+
+COPYRIGHT & LICENSE
+    Copyright 2010 Justin Davis, all rights reserved.
+
+    This program is free software; you can redistribute it and/or modify it
+    under the same terms as Perl itself.
+
