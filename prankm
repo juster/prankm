@@ -228,7 +228,7 @@ __END__
 
 =head1 NAME
 
-prankm -- Parallel ping ranking for pacman's mirrorlist.
+prankm -- Parallel ping ranker for pacman's mirrorlist.
 
 =head1 SYNOPSIS
 
