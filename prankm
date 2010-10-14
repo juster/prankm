@@ -249,21 +249,22 @@ prankm -- Parallel ping ranker for pacman's mirrorlist.
 
 =over 4
 
-=item B<-c|--count>
-
-rankm works by averaging out the delay of a few pings that are
-sent to the servers. This controls how many pings are averaged out.
-
-=item B<-m|--max>
+=item B<-n|--num>
 
 The maximum number of servers pacman should use. The top ranked
 servers are left uncommented in the output, with the rest commented
 out.
 
+=item B<-m|--max>
+
+The maximum amount of time to wait for ping responses. After this
+delay the program will stop waiting for pings and print the
+serverlist.
+
 =item B<-i|--inplace>
 
-Overwrite the I<first> source file given or I</etc/pacman.d/mirrorlist> if
-none were specified.
+Overwrite the mirrorlist file specified or I</etc/pacman.d/mirrorlist> if
+none was specified.
 
 =back
 

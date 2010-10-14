@@ -16,18 +16,19 @@ SYNOPSIS
        -h | --help     This help screen.
 
 OPTIONS
-    -c|--count
-        rankm works by averaging out the delay of a few pings that are sent
-        to the servers. This controls how many pings are averaged out.
-
-    -m|--max
+    -n|--num
         The maximum number of servers pacman should use. The top ranked
         servers are left uncommented in the output, with the rest commented
         out.
 
+    -m|--max
+        The maximum amount of time to wait for ping responses. After this
+        delay the program will stop waiting for pings and print the
+        serverlist.
+
     -i|--inplace
-        Overwrite the *first* source file given or
-        */etc/pacman.d/mirrorlist* if none were specified.
+        Overwrite the mirrorlist file specified or
+        */etc/pacman.d/mirrorlist* if none was specified.
 
 SEE ALSO
     pacman(8)
