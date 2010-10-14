@@ -1,0 +1,285 @@
+#!/usr/bin/perl -T
+
+use warnings;
+use strict;
+
+use Getopt::Long qw(:config gnu_getopt);
+use Pod::Usage   qw(pod2usage);
+use English      qw(-no_match_vars);
+use 5.010; # for //=
+
+use AnyEvent::DNS;
+use AnyEvent;
+
+our $VERSION = '0.01';
+
+our ($COUNT, $MAX, $OUTFILE, $INPLACE, $SERVERNUM);
+
+sub init
+{
+    my $help;
+    GetOptions( 'n|num=i'    => \$SERVERNUM,
+                'h|help'     => \$help,
+                'm|max=f'    => \$MAX,
+                'i|inplace'  => \$INPLACE ) or exit pod2usage();
+
+    exit pod2usage() if $help;
+
+
+    $OUTFILE     = $ARGV[0];
+    $MAX       ||= 0.25;
+    $SERVERNUM //= 20;
+
+    die "The value for the --max option must be a positive number.\n"
+        if $MAX < 0;
+    die "The value for the --num option must be a positive number.\n"
+        if $SERVERNUM < 0;
+
+    # AnyEvent::FastPing gives a cryptic error when not run as root...
+    die "prankm must be run as root. " .
+        "This is required to send ICMP ECHO requests.\n" unless $EUID == 0;
+    require AnyEvent::FastPing;
+
+    unless ( $OUTFILE ) {
+        $OUTFILE = '/etc/pacman.d/mirrorlist';
+        warn "Defaulting to $OUTFILE.\n";
+    }
+}
+
+sub read_host_uris
+{
+    my ($mlist_path) = @_;
+    my (%uris_for_host, %country_of_uri, $country);
+
+    $country = q{};
+    open my $mlist_file, '<', $mlist_path or die "open $mlist_path: $!";
+
+    MIRROR_LINE:
+    while ( <$mlist_file> ) {
+        if ( /^#/ && s/^#+\s*Server/Server/ == 0 ) {
+            ($country) = /^#+\s*([\w ]+)\s*$/;
+            next MIRROR_LINE;
+        }
+
+        # Ignore anything that isn't a Server line...
+        next MIRROR_LINE unless my ($uri) = /^\s*Server\s*=\s*(.+)$/;
+
+        my ($host) = $uri =~ m{(?:https?|ftp)://([^/]+)};
+        unless ( $host ) {
+            warn "Skipping bad URI $uri\n";
+            next MIRROR_LINE;
+        }
+
+        $country_of_uri{ $uri } = $country;
+        if ( $uris_for_host{ $host } ) {
+            push @{ $uris_for_host{ $host } }, $uri;
+        }
+        else {
+            $uris_for_host{ $host } = [ $uri ]
+        }
+    }
+
+    return \%uris_for_host, \%country_of_uri;
+}
+
+sub ping_hosts
+{
+    my ( $done_lookup, $done_ping )
+        = ( AnyEvent->condvar, AnyEvent->condvar );
+
+    my ( %host_of_ip, %ping_of_host );
+
+    my $ping_cb = sub {
+        for my $ping ( @{ $_[0] } ) {
+            my ($addr, $delay) = @$ping;
+            $ping_of_host{ $host_of_ip{ $addr }} = $delay;
+        }
+    };
+
+    AnyEvent::FastPing::register_cb( $ping_cb );
+
+    # Once a hostname is resolved, we can ping it...
+    my $lookup_cb = sub {
+        $done_lookup->end;
+
+        my $rec = shift;
+        return unless $rec;
+
+        my $addr = AnyEvent::Socket::aton( $rec->[3] );
+        $host_of_ip{ $addr } = $rec->[0];
+
+        # Send out ping requests as soon as we lookup the ipaddr.
+        AnyEvent::FastPing::icmp_ping( [[ $addr, $addr ]], undef,
+                                       'prankm', undef );
+    };
+
+    for my $host ( @_ ) {
+        $done_lookup->begin;
+        AnyEvent::DNS::resolver->resolve( $host, 'a', $lookup_cb );
+    }
+
+    $done_lookup->recv;
+
+    # Not all pings will necessarily receive a response...
+    # Do not wait forever.
+
+    my $t = AnyEvent->timer( after    => $MAX,
+                             cb       => sub {
+                                 $done_ping->send;
+                             } );
+    $done_ping->recv;
+
+    return \%ping_of_host;
+}
+
+sub group_by_country
+{
+    my ($uris_ref, $country_of_ref) = @_;
+
+    my %grouped;
+    for my $uri ( @$uris_ref ) {
+        my $country = $country_of_ref->{ $uri };
+        unshift @{$grouped{ $country }}, $uri;
+    }
+
+    for my $country ( keys %grouped ) {
+        $grouped{ $country } = [ sort @{$grouped{ $country }} ];
+    }
+
+    return map { [ $_, @{$grouped{ $_ }} ] } sort keys %grouped;
+}
+
+#-----------------------------------------------------------------------------
+# SCRIPT START
+#-----------------------------------------------------------------------------
+
+init();
+
+my ($uris_of_host, $country_of_uri) = read_host_uris( $OUTFILE );
+
+die "ERROR: No hosts read, is $OUTFILE empty?\n"
+    unless scalar keys %$uris_of_host;
+
+my $ping_time    = AnyEvent->now;
+my $ping_of_host = ping_hosts( keys %$uris_of_host );
+$ping_time       = AnyEvent->now - $ping_time;
+
+my (@bad_uris, @good_uris);
+
+COLLECT_LOOP:
+while ( my ($host, $uris) = each %$uris_of_host ) {
+    my $ping = $ping_of_host->{ $host };
+    unless ( $ping ) {
+        push @bad_uris, @$uris;
+        next COLLECT_LOOP;
+    }
+
+    push @good_uris, [ $ping, $uris_of_host->{ $host } ];
+}
+
+# Sort hosts we could ping successfully, fastest first...
+@good_uris = map { @{ $_->[1] } } sort { $a->[0] <=> $b->[0] } @good_uris;
+
+# If we have more good hosts then we need get rid of the slow ones...
+if ( $SERVERNUM && @good_uris > $SERVERNUM ) {
+    push @bad_uris, splice @good_uris, $SERVERNUM;
+}
+
+my $country = q{};
+my $date    = localtime;
+my @lines   = "# sorted by prankm $VERSION on $date\n";
+for my $good_uri ( @good_uris ) {
+    no warnings 'uninitialized';
+    my $next_country = $country_of_uri->{ $good_uri };
+    if ( $next_country ne $country ) {
+        $country = $next_country;
+        push @lines, "\n", ( $country ? "# $country\n" : "\n" );
+    }
+    push @lines, "Server = $good_uri\n";
+}
+
+push @lines, "\n#" . ( q{-} x 77 ) . "\n";
+
+for my $bad_ref ( group_by_country( \@bad_uris, $country_of_uri )) {
+    my $country = shift @$bad_ref;
+    push @lines, "\n", ( $country ? "# $country\n" : () ),
+        map { "#Server = $_\n" } @$bad_ref;
+}
+
+# Print to STDOUT unless --inplace option was used...
+if ( $INPLACE ) {
+    # If the --inplace option was given, then overwrite the old file...
+    open my $fh, '>', $OUTFILE or die "open: $!";
+    print $fh @lines;
+    close $fh;
+
+    print STDERR "\nWrote $OUTFILE.";
+}
+else {
+    print @lines;
+}
+
+printf STDERR "\n%d/%d pings in %.3f seconds.\n",
+    scalar keys %$ping_of_host, scalar keys %$uris_of_host, $ping_time;
+
+exit 0;
+
+__END__
+
+=head1 NAME
+
+prankm -- Parallel ping ranking for pacman's mirrorlist.
+
+=head1 SYNOPSIS
+
+  prankm [-i] [-n #] [-m #.#] [/etc/pacman.d/mirrorlist]
+
+  Ranks the mirrorlist file. If a mirrorlist is not given as an
+  argument then the default /etc/pacman.d/mirrorlist file is read.
+
+  Options:
+   -n | --num      The number of top ranked servers to use in file.
+                   Set to 0 to use all servers. Default: 20
+   -m | --max      Maximum delay to wait for pings, in seconds.
+                   Default: 0.25
+   -i | --inplace  Inplace editing, overwrite source file with results.
+   -h | --help     This help screen.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-c|--count>
+
+rankm works by averaging out the delay of a few pings that are
+sent to the servers. This controls how many pings are averaged out.
+
+=item B<-m|--max>
+
+The maximum number of servers pacman should use. The top ranked
+servers are left uncommented in the output, with the rest commented
+out.
+
+=item B<-i|--inplace>
+
+Overwrite the I<first> source file given or I</etc/pacman.d/mirrorlist> if
+none were specified.
+
+=back
+
+=head1 SEE ALSO
+
+L<pacman>(8)
+
+=head1 AUTHOR
+
+Justin Davis C<< <juster at cpan dot org> >>
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright 2010 Justin Davis, all rights reserved.
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+
+=cut
