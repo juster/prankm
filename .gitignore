@@ -1,3 +1,7 @@
 *~
 PKGBUILD
-
+*.bak
+*.tar.xz
+*.tar.gz
+src
+pkg
