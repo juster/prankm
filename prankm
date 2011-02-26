@@ -89,16 +89,7 @@ sub ping_hosts
 
     my ( %host_of_ip, %ping_of_host );
 
-    my $ping_cb = sub {
-        for my $ping ( @{ $_[0] } ) {
-            my ($addr, $delay) = @$ping;
-            $ping_of_host{ $host_of_ip{ $addr }} = $delay;
-        }
-    };
-
-    AnyEvent::FastPing::register_cb( $ping_cb );
-
-    # Once a hostname is resolved, we can ping it...
+    # First resolve all of the host names into IP addresses in a big batch.
     my $lookup_cb = sub {
         $done_lookup->end;
 
@@ -107,10 +98,6 @@ sub ping_hosts
 
         my $addr = AnyEvent::Socket::aton( $rec->[3] );
         $host_of_ip{ $addr } = $rec->[0];
-
-        # Send out ping requests as soon as we lookup the ipaddr.
-        AnyEvent::FastPing::icmp_ping( [[ $addr, $addr ]], undef,
-                                       'prankm', undef );
     };
 
     for my $host ( @_ ) {
@@ -118,15 +105,26 @@ sub ping_hosts
         AnyEvent::DNS::resolver->resolve( $host, 'a', $lookup_cb );
     }
 
+    # Waits until every begin() is matched by an end()
     $done_lookup->recv;
+
+    # Next, ping all our hosts in one big batch.
+
+    my $pinger = AnyEvent::FastPing->new;
+    my $recvcb = sub {
+        $ping_of_host{ $host_of_ip{ $_->[0] }} = $_->[1] for @{$_[0]}
+    };
+    $pinger->on_recv( $recvcb );
 
     # Not all pings will necessarily receive a response...
     # Do not wait forever.
+    $pinger->interval( 0 );
+    $pinger->max_rtt( $MAX );
+    $pinger->on_idle( sub { $done_ping->send; undef $pinger } );
 
-    my $t = AnyEvent->timer( after    => $MAX,
-                             cb       => sub {
-                                 $done_ping->send;
-                             } );
+    $pinger->add_hosts( [ keys %host_of_ip ] );
+    $pinger->start();
+
     $done_ping->recv;
 
     return \%ping_of_host;
